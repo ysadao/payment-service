@@ -1,0 +1,35 @@
+services:
+  api:
+    build: .
+    ports:
+      - "4103:4103"
+    environment:
+      PORT: 4103
+      DATA_DIR: /app/data
+      JWT_ACCESS_SECRET: pay-demo-access-secret-change-me
+      PROVIDER_WEBHOOK_SECRET: pay-demo-provider-hmac-secret
+    volumes:
+      - pay-data:/app/data
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pay
+      POSTGRES_PASSWORD: pay
+      POSTGRES_DB: pay
+    ports:
+      - "5435:5432"
+    volumes:
+      - pay-pg:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6382:6379"
+
+volumes:
+  pay-data:
+  pay-pg:
