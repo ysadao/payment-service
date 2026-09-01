@@ -1,16 +1,10 @@
-import path from "node:path";
-import { Store } from "./store.js";
-import { emptyDb, type DbShape, type IdempotencyRecord } from "./types.js";
-import { config } from "./config.js";
+import type { PrismaClient } from "@prisma/client";
+import { prisma } from "./db.js";
 
 export interface AppContext {
-  store: Store<DbShape>;
-  idempotency: Map<string, IdempotencyRecord>;
+  prisma: PrismaClient;
 }
 
-export function createContext(dataDir = config.dataDir): AppContext {
-  return {
-    store: new Store<DbShape>(path.join(dataDir, "payments.json"), emptyDb()),
-    idempotency: new Map(),
-  };
+export function createContext(client: PrismaClient = prisma): AppContext {
+  return { prisma: client };
 }

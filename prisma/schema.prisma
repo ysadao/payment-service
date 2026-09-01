@@ -1,0 +1,192 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PaymentStatus {
+  requires_confirmation
+  processing
+  succeeded
+  failed
+  canceled
+}
+
+enum LedgerDirection {
+  debit
+  credit
+}
+
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  passwordHash    String
+  emailVerifiedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  sessions                Session[]
+  emailVerificationTokens EmailVerificationToken[]
+  passwordResetTokens     PasswordResetToken[]
+  customers               Customer[]
+  payments                Payment[]
+  refunds                 Refund[]
+  idempotencyKeys         IdempotencyKey[]
+  auditLogs               AuditLog[]
+}
+
+model Session {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshHash String    @unique
+  userAgent   String?
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model Customer {
+  id         String    @id @default(uuid())
+  operatorId String
+  operator   User      @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  email      String
+  name       String
+  createdAt  DateTime  @default(now())
+  payments   Payment[]
+
+  @@index([operatorId])
+}
+
+model Payment {
+  id               String        @id @default(uuid())
+  operatorId       String
+  operator         User          @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  customerId       String
+  customer         Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  amountCents      Int
+  currency         String
+  status           PaymentStatus
+  providerChargeId String?       @unique
+  description      String        @default("")
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  events           PaymentEvent[]
+  refunds          Refund[]
+  ledgerEntries    LedgerEntry[]
+
+  @@index([operatorId])
+  @@index([customerId])
+  @@index([status])
+}
+
+model PaymentEvent {
+  id        String   @id @default(uuid())
+  paymentId String
+  payment   Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  type      String
+  data      Json
+  createdAt DateTime @default(now())
+
+  @@index([paymentId])
+}
+
+model Refund {
+  id            String        @id @default(uuid())
+  operatorId    String
+  operator      User          @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  paymentId     String
+  payment       Payment       @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  amountCents   Int
+  status        String
+  createdAt     DateTime      @default(now())
+  ledgerEntries LedgerEntry[]
+
+  @@index([paymentId])
+  @@index([operatorId])
+}
+
+model LedgerEntry {
+  id          String          @id @default(uuid())
+  paymentId   String
+  payment     Payment         @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  refundId    String?
+  refund      Refund?         @relation(fields: [refundId], references: [id], onDelete: SetNull)
+  operatorId  String
+  account     String
+  direction   LedgerDirection
+  amountCents Int
+  currency    String
+  createdAt   DateTime        @default(now())
+
+  @@index([paymentId])
+  @@index([operatorId])
+}
+
+model IdempotencyKey {
+  id           String   @id @default(uuid())
+  key          String
+  operatorId   String
+  operator     User     @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  method       String
+  path         String
+  requestHash  String
+  responseCode Int
+  responseBody Json
+  createdAt    DateTime @default(now())
+
+  @@unique([operatorId, method, path, key])
+  @@index([operatorId])
+}
+
+model WebhookEvent {
+  id          String    @id @default(uuid())
+  eventId     String    @unique
+  type        String
+  payload     Json
+  processedAt DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  actorId      String?
+  actor        User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action       String
+  resourceType String
+  resourceId   String?
+  metadata     Json
+  createdAt    DateTime @default(now())
+
+  @@index([actorId])
+  @@index([createdAt])
+}

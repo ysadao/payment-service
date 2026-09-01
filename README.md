@@ -1,25 +1,24 @@
-# Payment Service
+# Ledger — Operator Console
 
-Portfolio/reference implementation demonstrating production patterns.
+FinTech payments desk: Prisma + PostgreSQL, full operator auth, required idempotency on captures, HMAC provider webhooks, an immutable ledger, and a Vite React console served from Express.
 
-A FinTech-style payments backend with customers, payment intents, refunds, an immutable ledger, HMAC-verified provider webhooks, and **required** idempotency on payment creation. Persistence is a typed JSON file store (Windows-friendly; no native SQLite).
+## Demo login
 
-## Features
+| | |
+| --- | --- |
+| Email | `demo@ledger.app` |
+| Password | `LedgerDemo123!` |
 
-- Customer records
-- Payment intents: create → confirm → succeed / fail / cancel
-- Refunds against succeeded charges
-- `Idempotency-Key` **required** on `POST /payments`
-- Simulated card processor + `POST /webhooks/provider` (HMAC SHA-256)
-- Retry-safe webhooks (dedupe by `eventId`)
-- Immutable transaction ledger
-- Payment event timeline
-- Audit log
-- JWT-protected operator API (register/login)
+The seed user is **email-verified**. Seed also creates two customers, three payments (succeeded / processing / requires_confirmation), a refund on the succeeded charge, ledger lines, and audit rows.
+
+Set `DEMO_EXPOSE_TOKENS=true` (default in `.env.example`) so register / forgot-password / request-verification responses include the one-time token. Use that in the UI verify and reset screens.
 
 ## Stack
 
-TypeScript, Express, Zod, jsonwebtoken, bcryptjs, Node crypto HMAC, JSON store.
+- API: Express, TypeScript ESM, Zod, JWT access (15m) + opaque hashed refresh
+- Data: Prisma + PostgreSQL (`pay-pg` on host port **55432**)
+- UI: Vite + React operator console (navy / gold)
+- Tests: Node test runner against the **real** Postgres on `127.0.0.1:55432`
 
 ## Architecture
 
@@ -27,54 +26,87 @@ See [docs/architecture.md](docs/architecture.md) and [docs/why-idempotency.md](d
 
 State machine:
 
-`requires_confirmation` → `processing` → `succeeded` | `failed` | `canceled`
+`requires_confirmation` → `processing` → `succeeded` | `failed`
 
-Confirming an intent registers a provider charge id. The simulated provider then posts a signed webhook. Duplicate webhook deliveries are ignored after the first successful apply.
+Cancel is allowed only from `requires_confirmation`. Confirming mints a `ch_…` provider charge id. Settlement arrives as a signed webhook (or the demo simulator, which confirms if needed and posts a correctly signed webhook internally).
 
 ## API
 
-Default port: **4103**.
+Default port: **3103**. Express serves `web/dist` for the SPA.
 
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/health` | Liveness |
-| GET | `/docs` | Endpoint catalog |
-| POST | `/auth/register` | Operator account |
-| POST | `/auth/login` | JWT |
-| GET | `/customers` | Auth |
-| POST | `/customers` | Auth |
-| GET | `/customers/:id` | Auth |
-| POST | `/payments` | Auth + **Idempotency-Key** |
-| GET | `/payments` | Auth |
-| GET | `/payments/:id` | Auth |
-| GET | `/payments/:id/events` | Auth |
-| POST | `/payments/:id/confirm` | Auth |
-| POST | `/payments/:id/cancel` | Auth |
-| POST | `/refunds` | Auth + Idempotency-Key recommended |
-| GET | `/ledger` | Auth |
-| GET | `/audit` | Auth |
-| POST | `/webhooks/provider` | HMAC header `x-provider-signature` |
+| POST | `/api/auth/register` | Operator + session |
+| POST | `/api/auth/login` | Access + refresh |
+| POST | `/api/auth/refresh` | Rotation (old refresh dies) |
+| POST | `/api/auth/logout` | Revoke current / given session |
+| POST | `/api/auth/logout-all` | Revoke every refresh |
+| POST | `/api/auth/forgot-password` | Always `ok`; demo token when enabled |
+| POST | `/api/auth/reset-password` | Revokes all sessions |
+| POST | `/api/auth/verify-email` | One-time token |
+| POST | `/api/auth/request-verification` | Auth required |
+| GET | `/api/me` | Current operator |
+| GET | `/api/me/sessions` | List |
+| DELETE | `/api/me/sessions/:id` | Revoke |
+| GET | `/api/dashboard` | Status counts + recent ledger |
+| GET/POST | `/api/customers` | Scoped to the operator |
+| POST | `/api/payments` | Auth + **Idempotency-Key** required |
+| GET | `/api/payments` | List |
+| GET | `/api/payments/:id` | Get |
+| GET | `/api/payments/:id/events` | Timeline |
+| POST | `/api/payments/:id/confirm` | → processing |
+| POST | `/api/payments/:id/cancel` | From requires_confirmation |
+| POST | `/api/refunds` | Succeeded only; Idempotency-Key recommended |
+| GET | `/api/ledger` | Append-only lines |
+| GET | `/api/audit` | Operator actions |
+| POST | `/api/webhooks/provider` | HMAC `x-provider-signature` |
+| POST | `/api/demo/simulate-provider` | `{ paymentId, outcome }` — auth required |
+
+Webhook header: `t=<unix>,v1=<hex hmac>` where HMAC is `HMAC_SHA256(secret, `${t}.${rawBody}`)`, compared with `timingSafeEqual`, max age 5 minutes, deduped by `eventId`.
 
 ## Setup
 
+Postgres must already be reachable at `postgresql://app:app@127.0.0.1:55432/payments` (container `pay-pg`).
+
 ```bash
 npm install
+npm install --prefix web
 copy .env.example .env
+npx prisma migrate deploy
+npx prisma db seed
 npm run dev
-npm test
 ```
 
-## Environment variables
+In another terminal: `npm run dev:web` (Vite proxies `/api` to 3103). Production: `npm run build && npm start` — Express serves the SPA on 3103.
+
+```bash
+npm test
+npm run build
+```
+
+Tests set `BCRYPT_ROUNDS=4` and talk to the real database on 55432.
+
+## Environment
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PORT` | `4103` | Listen port |
-| `JWT_ACCESS_SECRET` | demo secret | Operator JWT |
-| `JWT_REFRESH_SECRET` | demo secret | Reserved |
-| `PROVIDER_WEBHOOK_SECRET` | demo secret | HMAC key for provider callbacks |
-| `DATA_DIR` | `./data` | JSON store |
-| `BCRYPT_ROUNDS` | `10` | Password hash cost |
+| `PORT` | `3103` | Listen port |
+| `DATABASE_URL` | `postgresql://app:app@127.0.0.1:55432/payments` | Prisma |
+| `JWT_ACCESS_SECRET` | demo secret | Access JWT |
+| `JWT_ACCESS_TTL` | `15m` | Access lifetime |
+| `JWT_REFRESH_TTL` | `7d` | Refresh lifetime |
+| `PROVIDER_WEBHOOK_SECRET` | demo secret | HMAC key |
+| `BCRYPT_ROUNDS` | `10` | Password hash cost (`4` in tests) |
+| `DEMO_EXPOSE_TOKENS` | `true` | Include verify/reset tokens in JSON |
 
-JWT and webhook secrets have safe local-demo defaults. Rotate them before any shared environment.
+## Docker
 
-Compose includes optional Postgres and Redis; the running service still uses the JSON store.
+```bash
+docker compose up --build
+```
+
+- Postgres: container `pay-pg`, host **55432**
+- App + SPA: **3103**
+
+Open http://127.0.0.1:3103 and sign in with the demo operator.

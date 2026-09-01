@@ -4,5 +4,5 @@ import { createContext } from "./context.js";
 
 const app = createApp(createContext());
 app.listen(config.port, () => {
-  console.log(`Payment service listening on http://127.0.0.1:${config.port}`);
+  console.log(`Ledger operator console on http://127.0.0.1:${config.port}`);
 });

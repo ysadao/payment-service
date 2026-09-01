@@ -1,7 +1,9 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
+import { Prisma } from "@prisma/client";
 import type { AppContext } from "../context.js";
-import { HttpError, type IdempotencyRecord, type Operator } from "../types.js";
+import { HttpError } from "../types.js";
+import type { AuthedRequest } from "./http.js";
 
 export function requireIdempotency(ctx: AppContext) {
   return async (req: Request, res: Response, next: NextFunction) => {
@@ -10,47 +12,91 @@ export function requireIdempotency(ctx: AppContext) {
       next(new HttpError(400, "Idempotency-Key header is required"));
       return;
     }
-    const operator = (req as Request & { operator?: Operator }).operator;
+    const operator = (req as AuthedRequest).operator;
     if (!operator) {
       next(new HttpError(401, "Authentication required"));
       return;
     }
     try {
-      const pathAtEntry = req.originalUrl.split("?")[0];
-      const memKey = `${operator.id}:${pathAtEntry}:${key}`;
+      const pathAtEntry = req.originalUrl.split("?")[0] ?? req.path;
+      const method = req.method.toUpperCase();
       const hash = createHash("sha256").update(JSON.stringify(req.body ?? null)).digest("hex");
-      const existing =
-        ctx.idempotency.get(memKey) ??
-        (await ctx.store.read()).idempotency.find(
-          (r) => r.operatorId === operator.id && r.key === key && r.path === pathAtEntry,
-        );
+      const existing = await ctx.prisma.idempotencyKey.findUnique({
+        where: {
+          operatorId_method_path_key: {
+            operatorId: operator.id,
+            method,
+            path: pathAtEntry,
+            key,
+          },
+        },
+      });
       if (existing) {
-        ctx.idempotency.set(memKey, existing);
         if (existing.requestHash !== hash) {
           throw new HttpError(409, "Idempotency-Key reused with a different request");
         }
-        res.status(existing.status).json(existing.body);
+        if (existing.responseCode === 0) {
+          throw new HttpError(409, "Idempotency-Key request is in progress");
+        }
+        res.status(existing.responseCode).json(existing.responseBody);
         return;
       }
+
+      try {
+        await ctx.prisma.idempotencyKey.create({
+          data: {
+            key,
+            operatorId: operator.id,
+            method,
+            path: pathAtEntry,
+            requestHash: hash,
+            responseCode: 0,
+            responseBody: {},
+          },
+        });
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          const raced = await ctx.prisma.idempotencyKey.findUnique({
+            where: {
+              operatorId_method_path_key: {
+                operatorId: operator.id,
+                method,
+                path: pathAtEntry,
+                key,
+              },
+            },
+          });
+          if (!raced) throw new HttpError(409, "Idempotency-Key conflict");
+          if (raced.requestHash !== hash) {
+            throw new HttpError(409, "Idempotency-Key reused with a different request");
+          }
+          if (raced.responseCode === 0) {
+            throw new HttpError(409, "Idempotency-Key request is in progress");
+          }
+          res.status(raced.responseCode).json(raced.responseBody);
+          return;
+        }
+        throw err;
+      }
+
       const originalJson = res.json.bind(res);
       res.json = ((body: unknown) => {
         const status = res.statusCode || 200;
-        const record: IdempotencyRecord = {
-          key,
-          operatorId: operator.id,
-          path: pathAtEntry,
-          requestHash: hash,
-          status,
-          body,
-          createdAt: new Date().toISOString(),
-        };
-        ctx.idempotency.set(memKey, record);
-        void ctx.store.update((db) => {
-          if (!db.idempotency.some((r) => r.operatorId === operator.id && r.key === key && r.path === pathAtEntry)) {
-            db.idempotency.push(record);
-          }
-        });
-        return originalJson(body);
+        void ctx.prisma.idempotencyKey
+          .update({
+            where: {
+              operatorId_method_path_key: {
+                operatorId: operator.id,
+                method,
+                path: pathAtEntry,
+                key,
+              },
+            },
+            data: { responseCode: status, responseBody: body as Prisma.InputJsonValue },
+          })
+          .catch(() => undefined)
+          .finally(() => originalJson(body));
+        return res;
       }) as typeof res.json;
       next();
     } catch (err) {
@@ -68,5 +114,3 @@ export function optionalIdempotency(ctx: AppContext) {
     void requireIdempotency(ctx)(req, res, next);
   };
 }
-
-export { randomUUID };

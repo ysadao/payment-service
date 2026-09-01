@@ -1,35 +1,37 @@
 services:
-  api:
-    build: .
-    ports:
-      - "4103:4103"
-    environment:
-      PORT: 4103
-      DATA_DIR: /app/data
-      JWT_ACCESS_SECRET: pay-demo-access-secret-change-me
-      PROVIDER_WEBHOOK_SECRET: pay-demo-provider-hmac-secret
-    volumes:
-      - pay-data:/app/data
-    depends_on:
-      - postgres
-      - redis
-
   postgres:
     image: postgres:16-alpine
+    container_name: pay-pg
     environment:
-      POSTGRES_USER: pay
-      POSTGRES_PASSWORD: pay
-      POSTGRES_DB: pay
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: payments
     ports:
-      - "5435:5432"
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d payments"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
     volumes:
       - pay-pg:/var/lib/postgresql/data
 
-  redis:
-    image: redis:7-alpine
+  app:
+    build: .
     ports:
-      - "6382:6379"
+      - "3103:3103"
+    environment:
+      PORT: 3103
+      DATABASE_URL: postgresql://app:app@postgres:5432/payments
+      DEMO_EXPOSE_TOKENS: "true"
+      JWT_ACCESS_SECRET: pay-demo-access-secret-change-me
+      JWT_REFRESH_SECRET: pay-demo-refresh-secret-change-me
+      JWT_ACCESS_TTL: 15m
+      JWT_REFRESH_TTL: 7d
+      PROVIDER_WEBHOOK_SECRET: pay-demo-provider-hmac-secret
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
-  pay-data:
   pay-pg:

@@ -8,11 +8,31 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: payments
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d payments"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 8
+    env:
+      DATABASE_URL: postgresql://app:app@127.0.0.1:55432/payments
+      DEMO_EXPOSE_TOKENS: "true"
+      BCRYPT_ROUNDS: "4"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       - run: npm install
+      - run: npm install --prefix web
+      - run: npx prisma migrate deploy
       - run: npm test
       - run: npm run build

@@ -1,9 +1,11 @@
 FROM node:22-alpine
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm install
+COPY prisma ./prisma
+COPY web/package.json ./web/package.json
+RUN npm install && npm install --prefix web
 COPY . .
-RUN npm run build
-ENV NODE_ENV=production PORT=4103
-EXPOSE 4103
-CMD ["node", "dist/index.js"]
+RUN npx prisma generate && npm run build --prefix web && npx tsc
+ENV NODE_ENV=production PORT=3103 DEMO_EXPOSE_TOKENS=true
+EXPOSE 3103
+CMD ["sh", "-c", "npx prisma migrate deploy && node --import tsx prisma/seed.ts && node dist/index.js"]
