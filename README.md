@@ -2,6 +2,10 @@
 
 FinTech payments desk: Prisma + PostgreSQL, full operator auth, required idempotency on captures, HMAC provider webhooks, an immutable ledger, and a Vite React console served from Express.
 
+Operational surface: `GET /api/ready` (Postgres ping), `GET /api/openapi.json`, `x-request-id` on every response, JSON request logs.
+
+This is a **reference implementation** of senior payments API patterns. It is not a live processor and does not prove years of production on-call.
+
 ## Demo login
 
 | | |

@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import type { AppContext } from "./context.js";
-import { errorHandler } from "./middleware/http.js";
+import { errorHandler, asyncHandler } from "./middleware/http.js";
+import { readiness, requestContext, securityHeaders, openApiSpec } from "./observability.js";
 import { buildRouter } from "./routes/api.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -48,6 +49,8 @@ const DOCS = {
 
 export function createApp(ctx: AppContext) {
   const app = express();
+  app.use(requestContext);
+  app.use(securityHeaders);
   app.use(
     express.json({
       verify: (req, _res, buf) => {
@@ -61,6 +64,8 @@ export function createApp(ctx: AppContext) {
   };
   app.get("/health", health);
   app.get("/api/health", health);
+  app.get("/api/ready", asyncHandler(readiness));
+  app.get("/api/openapi.json", (_req, res) => res.json(openApiSpec));
   app.get("/api/docs", (_req, res) => res.json(DOCS));
   app.use("/api", buildRouter(ctx));
 

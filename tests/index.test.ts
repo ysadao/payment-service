@@ -238,3 +238,13 @@ test("operator isolation: B cannot see A's customers or payments", async () => {
   const bConfirm = await json("POST", `/api/payments/${payment.data.id}/confirm`, {}, auth(b.accessToken));
   assert.equal(bConfirm.status, 404);
 });
+
+test("readiness pings postgres, openapi and request ids", async () => {
+  const ready = await json("GET", "/api/ready");
+  assert.equal(ready.status, 200);
+  assert.equal(ready.data.status, "ready");
+  const spec = await json("GET", "/api/openapi.json");
+  assert.equal(spec.data.openapi, "3.0.3");
+  const res = await fetch(`${base}/api/health`, { headers: { "x-request-id": "ledger-review-1" } });
+  assert.equal(res.headers.get("x-request-id"), "ledger-review-1");
+});

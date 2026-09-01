@@ -14,13 +14,16 @@ export class HttpErrorParser {
   }
 }
 
-export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
+export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction) {
+  const requestId = (req as Request & { requestId?: string }).requestId;
   if (err instanceof HttpError) {
-    res.status(err.status).json({ error: err.message, details: err.details ?? null });
+    res.status(err.status).json({ error: err.message, details: err.details ?? null, requestId });
     return;
   }
-  console.error(err);
-  res.status(500).json({ error: "Internal server error" });
+  process.stderr.write(
+    `${JSON.stringify({ level: "error", msg: "unhandled_error", requestId, error: err instanceof Error ? err.message : String(err) })}\n`,
+  );
+  res.status(500).json({ error: "Internal server error", requestId });
 }
 
 export function asyncHandler(fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>) {
