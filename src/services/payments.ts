@@ -1,32 +1,26 @@
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { Payment, Prisma } from "@prisma/client";
 import { Prisma as PrismaNS } from "@prisma/client";
 import { config } from "../config.js";
 import type { AppContext } from "../context.js";
+import {
+  assertEntryBalanced,
+  assertTotalsBalanced,
+  captureJournal,
+  LedgerInvariantError,
+  refundJournal,
+  type JournalEntry,
+} from "../domain/ledger-book.js";
+import {
+  assertRefundAmount,
+  canRefund,
+  transition,
+  type PaymentStatus,
+} from "../domain/payment-machine.js";
+import { signProviderPayload, verifyProviderSignature } from "../infra/provider-signature.js";
 import { HttpError } from "../types.js";
 
-export function signProviderPayload(rawBody: string, secret = config.providerWebhookSecret, ts = Math.floor(Date.now() / 1000)) {
-  const v1 = createHmac("sha256", secret).update(`${ts}.${rawBody}`).digest("hex");
-  return { header: `t=${ts},v1=${v1}`, ts, v1 };
-}
-
-export function verifyProviderSignature(rawBody: string, header: string | undefined, maxAgeSec = 300) {
-  if (!header) throw new HttpError(401, "Missing x-provider-signature");
-  const parts = Object.fromEntries(
-    header.split(",").map((p) => {
-      const [k, v] = p.split("=");
-      return [k.trim(), v];
-    }),
-  );
-  const ts = Number(parts.t);
-  const v1 = parts.v1;
-  if (!ts || !v1) throw new HttpError(401, "Malformed provider signature");
-  if (Math.abs(Date.now() / 1000 - ts) > maxAgeSec) throw new HttpError(401, "Stale provider signature");
-  const expected = createHmac("sha256", config.providerWebhookSecret).update(`${ts}.${rawBody}`).digest("hex");
-  const a = Buffer.from(v1, "hex");
-  const b = Buffer.from(expected, "hex");
-  if (a.length !== b.length || !timingSafeEqual(a, b)) throw new HttpError(401, "Invalid provider signature");
-}
+export { signProviderPayload, verifyProviderSignature };
 
 export function serializePayment(p: Payment) {
   return {
@@ -47,22 +41,29 @@ async function pushEvent(tx: Prisma.TransactionClient, paymentId: string, type: 
   await tx.paymentEvent.create({ data: { paymentId, type, data: data as Prisma.InputJsonValue } });
 }
 
-async function postLedger(
-  tx: Prisma.TransactionClient,
-  paymentId: string,
-  refundId: string | null,
-  operatorId: string,
-  amountCents: number,
-  currency: string,
-  debit: string,
-  credit: string,
-) {
+async function postJournal(tx: Prisma.TransactionClient, entry: JournalEntry) {
+  assertEntryBalanced(entry);
   await tx.ledgerEntry.createMany({
-    data: [
-      { paymentId, refundId, operatorId, account: debit, direction: "debit", amountCents, currency },
-      { paymentId, refundId, operatorId, account: credit, direction: "credit", amountCents, currency },
-    ],
+    data: entry.lines.map((line) => ({
+      paymentId: entry.paymentId,
+      refundId: entry.refundId,
+      operatorId: entry.operatorId,
+      account: line.account,
+      direction: line.direction,
+      amountCents: line.amountCents,
+      currency: line.currency,
+    })),
   });
+  const rows = await tx.ledgerEntry.findMany({
+    where: { paymentId: entry.paymentId },
+    select: { direction: true, amountCents: true },
+  });
+  try {
+    assertTotalsBalanced(entry.paymentId, rows);
+  } catch (err) {
+    if (err instanceof LedgerInvariantError) throw new HttpError(500, err.message);
+    throw err;
+  }
 }
 
 async function writeAudit(
@@ -76,6 +77,12 @@ async function writeAudit(
   await tx.auditLog.create({
     data: { actorId, action, resourceType, resourceId, metadata: metadata as Prisma.InputJsonValue },
   });
+}
+
+function applyTransition(status: PaymentStatus, command: Parameters<typeof transition>[1]) {
+  const result = transition(status, command);
+  if (!result.ok) throw new HttpError(result.status, result.message);
+  return result;
 }
 
 export async function createPayment(
@@ -106,14 +113,12 @@ export async function confirmPayment(ctx: AppContext, operatorId: string, paymen
   return ctx.prisma.$transaction(async (tx) => {
     const row = await tx.payment.findFirst({ where: { id: paymentId, operatorId } });
     if (!row) throw new HttpError(404, "Payment not found");
-    if (row.status === "processing" || row.status === "succeeded") return row;
-    if (row.status !== "requires_confirmation") {
-      throw new HttpError(409, `Cannot confirm payment in status ${row.status}`);
-    }
+    const result = applyTransition(row.status, "confirm");
+    if (result.idempotent) return row;
     const updated = await tx.payment.update({
       where: { id: row.id },
       data: {
-        status: "processing",
+        status: result.next,
         providerChargeId: `ch_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
       },
     });
@@ -129,13 +134,11 @@ export async function cancelPayment(ctx: AppContext, operatorId: string, payment
   return ctx.prisma.$transaction(async (tx) => {
     const row = await tx.payment.findFirst({ where: { id: paymentId, operatorId } });
     if (!row) throw new HttpError(404, "Payment not found");
-    if (row.status === "canceled") return row;
-    if (row.status !== "requires_confirmation") {
-      throw new HttpError(409, `Cannot cancel payment in status ${row.status}`);
-    }
+    const result = applyTransition(row.status, "cancel");
+    if (result.idempotent) return row;
     const updated = await tx.payment.update({
       where: { id: row.id },
-      data: { status: "canceled" },
+      data: { status: result.next },
     });
     await pushEvent(tx, updated.id, "payment.canceled", {});
     await writeAudit(tx, operatorId, "payment.canceled", "payment", updated.id, {});
@@ -165,21 +168,24 @@ export async function applyProviderEvent(
       });
       const row = await tx.payment.findUnique({ where: { providerChargeId: event.providerChargeId } });
       if (!row) throw new HttpError(404, "Unknown provider charge");
-      if (row.status === "succeeded" || row.status === "failed" || row.status === "canceled") return row;
-      if (row.status !== "processing") throw new HttpError(409, `Unexpected status ${row.status} for provider event`);
+
+      const command = event.type === "charge.succeeded" ? "provider_succeeded" : "provider_failed";
+      const result = applyTransition(row.status, command);
+      if (result.idempotent) return row;
+
       if (event.type === "charge.succeeded") {
         const updated = await tx.payment.update({
           where: { id: row.id },
-          data: { status: "succeeded" },
+          data: { status: result.next },
         });
-        await postLedger(tx, row.id, null, row.operatorId, row.amountCents, row.currency, "processor_clearing", "merchant_receivable");
+        await postJournal(tx, captureJournal(row.id, row.operatorId, row.amountCents, row.currency));
         await pushEvent(tx, row.id, "payment.succeeded", {});
         await writeAudit(tx, null, event.type, "payment", row.id, { eventId: event.eventId });
         return updated;
       }
       const updated = await tx.payment.update({
         where: { id: row.id },
-        data: { status: "failed" },
+        data: { status: result.next },
       });
       await pushEvent(tx, row.id, "payment.failed", { message: event.failureMessage ?? "declined" });
       await writeAudit(tx, null, event.type, "payment", row.id, { eventId: event.eventId });
@@ -199,17 +205,21 @@ export async function refundPayment(ctx: AppContext, operatorId: string, payment
   return ctx.prisma.$transaction(async (tx) => {
     const row = await tx.payment.findFirst({ where: { id: paymentId, operatorId } });
     if (!row) throw new HttpError(404, "Payment not found");
-    if (row.status !== "succeeded") throw new HttpError(409, "Only succeeded payments can be refunded");
+    const refundGate = canRefund(row.status);
+    if (!refundGate.ok) throw new HttpError(refundGate.status, refundGate.message);
+
     const already = await tx.refund.aggregate({
       where: { paymentId, status: "succeeded" },
       _sum: { amountCents: true },
     });
     const captured = already._sum.amountCents ?? 0;
-    if (amountCents + captured > row.amountCents) throw new HttpError(400, "Refund exceeds captured amount");
+    const amountGate = assertRefundAmount(row.amountCents, captured, amountCents);
+    if (!amountGate.ok) throw new HttpError(amountGate.status, amountGate.message);
+
     const refund = await tx.refund.create({
       data: { operatorId, paymentId, amountCents, status: "succeeded" },
     });
-    await postLedger(tx, paymentId, refund.id, operatorId, amountCents, row.currency, "merchant_receivable", "processor_clearing");
+    await postJournal(tx, refundJournal(paymentId, refund.id, operatorId, amountCents, row.currency));
     await pushEvent(tx, paymentId, "refund.succeeded", { refundId: refund.id, amountCents });
     await writeAudit(tx, operatorId, "refund.created", "refund", refund.id, { paymentId, amountCents });
     return {
@@ -228,6 +238,9 @@ export async function simulateProvider(
   paymentId: string,
   outcome: "succeeded" | "failed",
 ) {
+  if (!config.allowDemoSimulator) {
+    throw new HttpError(404, "Not found");
+  }
   let payment = await ctx.prisma.payment.findFirst({ where: { id: paymentId, operatorId } });
   if (!payment) throw new HttpError(404, "Payment not found");
   if (payment.status === "requires_confirmation") {

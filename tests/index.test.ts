@@ -47,7 +47,7 @@ test("health", async () => {
   assert.equal(api.status, 200);
 });
 
-test("auth verify, reset, refresh rotation, logout-all", async () => {
+test("auth verify, reset, refresh reuse kills family, logout-all", async () => {
   const user = await registerOp("auth");
   assert.ok(user.accessToken);
   assert.ok(user.refreshToken);
@@ -60,11 +60,18 @@ test("auth verify, reset, refresh rotation, logout-all", async () => {
   assert.equal(me.status, 200);
   assert.equal(me.data.user.emailVerified, true);
 
+  const secondLogin = await json("POST", "/api/auth/login", { email: user.email, password: "password12" });
+  assert.equal(secondLogin.status, 200);
+
   const rotated = await json("POST", "/api/auth/refresh", { refreshToken: user.refreshToken });
   assert.equal(rotated.status, 200);
   assert.ok(rotated.data.accessToken);
   const reused = await json("POST", "/api/auth/refresh", { refreshToken: user.refreshToken });
   assert.equal(reused.status, 401);
+  const afterReuseA = await json("POST", "/api/auth/refresh", { refreshToken: rotated.data.refreshToken });
+  const afterReuseB = await json("POST", "/api/auth/refresh", { refreshToken: secondLogin.data.refreshToken });
+  assert.equal(afterReuseA.status, 401);
+  assert.equal(afterReuseB.status, 401);
 
   const forgot = await json("POST", "/api/auth/forgot-password", { email: user.email });
   assert.equal(forgot.status, 200);
@@ -168,11 +175,15 @@ test("idempotent capture, cannot confirm canceled, refund only on succeeded, web
   assert.equal(refund.status, 201);
 
   const ledger = await json("GET", "/api/ledger", undefined, hdr);
-  const cents = ledger.data.ledger.reduce(
-    (s: number, e: { direction: string; amountCents: number }) => s + (e.direction === "credit" ? e.amountCents : 0),
-    0,
-  );
-  assert.equal(cents, 2500);
+  const forPayment = ledger.data.ledger.filter((e: { paymentId: string }) => e.paymentId === first.data.id);
+  const debit = forPayment
+    .filter((e: { direction: string }) => e.direction === "debit")
+    .reduce((s: number, e: { amountCents: number }) => s + e.amountCents, 0);
+  const credit = forPayment
+    .filter((e: { direction: string }) => e.direction === "credit")
+    .reduce((s: number, e: { amountCents: number }) => s + e.amountCents, 0);
+  assert.equal(debit, credit);
+  assert.equal(debit, 2500);
 
   const cancelable = await json(
     "POST",
@@ -202,6 +213,60 @@ test("bad webhook signature is rejected", async () => {
     body: JSON.stringify({ eventId: "evt_nope123", type: "charge.succeeded", providerChargeId: "ch_x" }),
   });
   assert.equal(res.status, 401);
+});
+
+test("webhook rejects missing and stale signatures", async () => {
+  const body = JSON.stringify({
+    eventId: `evt_${randomUUID().replace(/-/g, "")}`,
+    type: "charge.succeeded",
+    providerChargeId: "ch_missing",
+  });
+  const missing = await fetch(`${base}/api/webhooks/provider`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+  });
+  assert.equal(missing.status, 401);
+
+  const staleTs = Math.floor(Date.now() / 1000) - 400;
+  const { header } = signProviderPayload(body, undefined, staleTs);
+  const stale = await fetch(`${base}/api/webhooks/provider`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-provider-signature": header },
+    body,
+  });
+  assert.equal(stale.status, 401);
+});
+
+test("concurrent identical Idempotency-Key yields one payment", async () => {
+  const op = await registerOp("race");
+  const hdr = auth(op.accessToken);
+  const customer = await json("POST", "/api/customers", { email: "race@test.com", name: "Race" }, hdr);
+  assert.equal(customer.status, 201);
+  const body = {
+    customerId: customer.data.id,
+    amountCents: 1500,
+    currency: "usd",
+    description: "race",
+  };
+  const key = `race-${randomUUID()}`;
+  const results = await Promise.all([
+    json("POST", "/api/payments", body, { ...hdr, "idempotency-key": key }),
+    json("POST", "/api/payments", body, { ...hdr, "idempotency-key": key }),
+    json("POST", "/api/payments", body, { ...hdr, "idempotency-key": key }),
+  ]);
+  const ok = results.filter((r) => r.status === 201);
+  const busy = results.filter((r) => r.status === 409);
+  assert.ok(ok.length >= 1, JSON.stringify(results.map((r) => r.status)));
+  assert.equal(ok.length + busy.length, 3);
+  // After races settle, replay must return the same payment id
+  const replay = await json("POST", "/api/payments", body, { ...hdr, "idempotency-key": key });
+  assert.equal(replay.status, 201);
+  const ids = new Set(ok.map((r) => r.data.id).concat(replay.data.id));
+  assert.equal(ids.size, 1);
+
+  const listed = await json("GET", "/api/payments", undefined, hdr);
+  assert.equal(listed.data.payments.length, 1);
 });
 
 test("operator isolation: B cannot see A's customers or payments", async () => {

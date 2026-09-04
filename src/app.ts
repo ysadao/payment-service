@@ -2,6 +2,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import { config } from "./config.js";
 import type { AppContext } from "./context.js";
 import { errorHandler, asyncHandler } from "./middleware/http.js";
 import { readiness, requestContext, securityHeaders, openApiSpec } from "./observability.js";
@@ -60,7 +61,12 @@ export function createApp(ctx: AppContext) {
   );
 
   const health = (_req: express.Request, res: express.Response) => {
-    res.json({ status: "ok", service: "payment-service", time: new Date().toISOString() });
+    res.json({
+      status: "ok",
+      service: "payment-service",
+      time: new Date().toISOString(),
+      demoSimulator: config.allowDemoSimulator,
+    });
   };
   app.get("/health", health);
   app.get("/api/health", health);

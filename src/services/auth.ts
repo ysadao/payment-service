@@ -97,7 +97,18 @@ export async function login(ctx: AppContext, input: z.infer<typeof loginSchema>,
 export async function refresh(ctx: AppContext, refreshToken: string, userAgent: string | null) {
   const hash = sha(refreshToken);
   const session = await ctx.prisma.session.findUnique({ where: { refreshHash: hash } });
-  if (!session || session.revokedAt) throw new HttpError(401, "Invalid refresh token");
+  if (!session) throw new HttpError(401, "Invalid refresh token");
+  // Reuse of a rotated/revoked refresh is treated as theft: kill the whole family.
+  if (session.revokedAt) {
+    await ctx.prisma.session.updateMany({
+      where: { userId: session.userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    await writeAudit(ctx, session.userId, "session.reuse_detected", "session", session.id, {
+      reason: "revoked_refresh_presented",
+    });
+    throw new HttpError(401, "Invalid refresh token");
+  }
   if (session.expiresAt.getTime() < Date.now()) throw new HttpError(401, "Refresh token expired");
   const user = await ctx.prisma.user.findUnique({ where: { id: session.userId } });
   if (!user) throw new HttpError(401, "User not found");

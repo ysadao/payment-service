@@ -27,6 +27,7 @@ export function PaymentDetail() {
   const [events, setEvents] = useState<EventRow[]>([]);
   const [refundAmt, setRefundAmt] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [demoSimulator, setDemoSimulator] = useState(false);
 
   async function load() {
     if (!id) return;
@@ -39,6 +40,10 @@ export function PaymentDetail() {
   }
 
   useEffect(() => {
+    fetch("/api/health")
+      .then((r) => r.json())
+      .then((body: { demoSimulator?: boolean }) => setDemoSimulator(Boolean(body.demoSimulator)))
+      .catch(() => setDemoSimulator(false));
     load().catch((err) => setError(err.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -95,7 +100,7 @@ export function PaymentDetail() {
                 </button>
               </>
             )}
-            {(payment.status === "requires_confirmation" || payment.status === "processing") && (
+            {demoSimulator && (payment.status === "requires_confirmation" || payment.status === "processing") && (
               <>
                 <button
                   type="button"

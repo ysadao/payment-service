@@ -15,7 +15,7 @@ This is a **reference implementation** of senior payments API patterns. It is no
 
 The seed user is **email-verified**. Seed also creates two customers, three payments (succeeded / processing / requires_confirmation), a refund on the succeeded charge, ledger lines, and audit rows.
 
-Set `DEMO_EXPOSE_TOKENS=true` (default in `.env.example`) so register / forgot-password / request-verification responses include the one-time token. Use that in the UI verify and reset screens.
+Set `DEMO_EXPOSE_TOKENS=true` for local UI flows so register / forgot-password responses include one-time tokens, and so `POST /api/demo/simulate-provider` is enabled. Default is **off** (production Docker image never enables it).
 
 ## Stack
 
@@ -43,7 +43,7 @@ Default port: **3103**. Express serves `web/dist` for the SPA.
 | GET | `/health` | Liveness |
 | POST | `/api/auth/register` | Operator + session |
 | POST | `/api/auth/login` | Access + refresh |
-| POST | `/api/auth/refresh` | Rotation (old refresh dies) |
+| POST | `/api/auth/refresh` | Rotation; **reuse of a revoked refresh revokes all sessions** |
 | POST | `/api/auth/logout` | Revoke current / given session |
 | POST | `/api/auth/logout-all` | Revoke every refresh |
 | POST | `/api/auth/forgot-password` | Always `ok`; demo token when enabled |
@@ -65,9 +65,9 @@ Default port: **3103**. Express serves `web/dist` for the SPA.
 | GET | `/api/ledger` | Append-only lines |
 | GET | `/api/audit` | Operator actions |
 | POST | `/api/webhooks/provider` | HMAC `x-provider-signature` |
-| POST | `/api/demo/simulate-provider` | `{ paymentId, outcome }` — auth required |
+| POST | `/api/demo/simulate-provider` | Opt-in via `DEMO_EXPOSE_TOKENS=true` only |
 
-Webhook header: `t=<unix>,v1=<hex hmac>` where HMAC is `HMAC_SHA256(secret, `${t}.${rawBody}`)`, compared with `timingSafeEqual`, max age 5 minutes, deduped by `eventId`.
+Webhook header: `t=<unix>,v1=<hex hmac>` where HMAC is `HMAC_SHA256(secret, `${t}.${rawBody}`)`, compared with `timingSafeEqual`, max age 5 minutes, deduped by `eventId`. Ledger posts assert Σ debit == Σ credit per payment after every write.
 
 ## Setup
 
@@ -102,7 +102,7 @@ Tests set `BCRYPT_ROUNDS=4` and talk to the real database on 55432.
 | `JWT_REFRESH_TTL` | `7d` | Refresh lifetime |
 | `PROVIDER_WEBHOOK_SECRET` | demo secret | HMAC key |
 | `BCRYPT_ROUNDS` | `10` | Password hash cost (`4` in tests) |
-| `DEMO_EXPOSE_TOKENS` | `true` | Include verify/reset tokens in JSON |
+| `DEMO_EXPOSE_TOKENS` | `false` | When `true`: echo verify/reset tokens + enable simulate-provider |
 
 ## Docker
 
@@ -111,6 +111,18 @@ docker compose up --build
 ```
 
 - Postgres: container `pay-pg`, host **55432**
-- App + SPA: **3103**
+- App + SPA: **3103** (compose seeds the demo operator; the production image CMD does **not** auto-seed)
 
 Open http://127.0.0.1:3103 and sign in with the demo operator.
+
+## For reviewers
+
+If you are reading this as a code sample, start here:
+
+1. [`docs/architecture.md`](./docs/architecture.md) — domain vs infra split  
+2. [`docs/why-idempotency.md`](./docs/why-idempotency.md) — capture key design  
+3. [`src/domain/`](./src/domain/) — payment state machine + ledger journal builders  
+4. [`src/infra/provider-signature.ts`](./src/infra/provider-signature.ts) — HMAC adapter  
+5. [`tests/domain.test.ts`](./tests/domain.test.ts) then [`tests/index.test.ts`](./tests/index.test.ts)
+
+Decisions worth noticing: provider settlement is driven by a pure state machine; ledger posts assert Σ debit == Σ credit; refresh-token reuse revokes the whole session family; `simulate-provider` is opt-in only.

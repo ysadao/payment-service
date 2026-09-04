@@ -29,6 +29,7 @@ services:
       JWT_ACCESS_TTL: 15m
       JWT_REFRESH_TTL: 7d
       PROVIDER_WEBHOOK_SECRET: pay-demo-provider-hmac-secret
+    command: ["sh", "-c", "npx prisma migrate deploy && node --import tsx prisma/seed.ts && node dist/index.js"]
     depends_on:
       postgres:
         condition: service_healthy

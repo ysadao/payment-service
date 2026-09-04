@@ -9,6 +9,9 @@ export const config = {
   get port() {
     return Number(process.env.PORT ?? 3103);
   },
+  get nodeEnv() {
+    return process.env.NODE_ENV ?? "development";
+  },
   get databaseUrl() {
     return process.env.DATABASE_URL ?? "postgresql://app:app@127.0.0.1:55432/payments";
   },
@@ -31,7 +34,11 @@ export const config = {
     return Number(process.env.BCRYPT_ROUNDS ?? 10);
   },
   get demoExposeTokens() {
-    return (process.env.DEMO_EXPOSE_TOKENS ?? "true") === "true";
+    return process.env.DEMO_EXPOSE_TOKENS === "true";
+  },
+  /** Simulator + token echo: opt-in via DEMO_EXPOSE_TOKENS (never on by default). */
+  get allowDemoSimulator() {
+    return process.env.DEMO_EXPOSE_TOKENS === "true";
   },
 };
 

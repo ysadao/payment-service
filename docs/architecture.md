@@ -1,31 +1,40 @@
 # Architecture
 
-Ledger is an operator console for card-not-present payments: Prisma/PostgreSQL, session auth, required capture idempotency, HMAC webhooks, and an immutable debit/credit ledger.
+Ledger separates **payment rules** (pure domain) from **HTTP/Postgres** and from **provider crypto**.
+
+```
+routes/ → services/payments.ts → domain/payment-machine.ts
+                              → domain/ledger-book.ts
+                              → infra/provider-signature.ts
+                              → prisma
+```
 
 ## Components
 
-- **Operator auth** — register / login / refresh rotation / logout / logout-all / verify-email / forgot-reset. JWT access (15m) plus opaque refresh tokens stored as SHA-256 hashes. Sessions can be listed and revoked.
+- **Operator auth** — register / login / refresh (reuse of a revoked refresh revokes the whole session family) / logout / logout-all / verify-email / forgot-reset. JWT access (15m) plus opaque refresh tokens stored as SHA-256 hashes.
 - **Tenancy** — `Customer` and `Payment` rows carry `operatorId`. Operator B cannot list or mutate A's records.
-- **Payment intents** — amount, currency, customer, status enum.
-- **Provider adapter** — in-process simulator that mints `ch_…` charge ids on confirm.
-- **Webhooks** — HMAC SHA-256 over `t.rawBody`; `x-provider-signature: t=<unix>,v1=<hex>`; 5-minute max age; `timingSafeEqual`; unique `eventId`.
-- **Demo simulator** — authenticated `POST /api/demo/simulate-provider` confirms if needed, signs a webhook with the real secret, and applies it internally so the UI can settle without curl.
-- **Ledger** — append-only debit/credit entries; refunds post reversing lines. No updates in place.
-- **Idempotency store** — Prisma unique on `(operatorId, method, path, key)`.
+- **Payment state machine** (`domain/payment-machine.ts`) — pure transitions for confirm / cancel / provider settle / refund gates. Services map denials to HTTP 4xx.
+- **Ledger book** (`domain/ledger-book.ts`) — builds balanced debit/credit journals; asserts entry and payment-level totals before commit.
+- **Provider signature adapter** (`infra/provider-signature.ts`) — Stripe-style `t=,v1=` HMAC with `timingSafeEqual` and max-age window.
+- **Webhooks** — unique `eventId` dedupe (including P2002 race); settlement applies the state machine inside a transaction.
+- **Demo simulator** — `POST /api/demo/simulate-provider` only when `DEMO_EXPOSE_TOKENS=true`.
+- **Idempotency store** — Prisma unique on `(operatorId, method, path, key)` with in-progress and body-hash clash handling.
 
-## Webhook verification
+## State machine
 
-`x-provider-signature` is `t=<unix>,v1=<hex hmac>`. HMAC is `HMAC_SHA256(secret, \`${t}.${rawBody}\`)`. Signatures older than five minutes are rejected. Processing is keyed by `eventId` so retries are no-ops.
+`requires_confirmation` → `processing` → `succeeded` | `failed`
+
+Cancel only from `requires_confirmation`. Confirm is idempotent once already `processing`/`succeeded`. Provider events on terminal statuses are no-ops.
 
 ## Ledger invariant
 
-A succeeded payment posts:
+Capture posts:
 
 - debit `processor_clearing`
 - credit `merchant_receivable`
 
-A refund posts the inverse. Entries are never updated in place.
+Refund posts the inverse. Entries are never updated in place. Runtime asserts Σ debit == Σ credit for the payment after every journal post.
 
 ## SPA
 
-Vite builds `web/dist`. Express serves it on port 3103 and falls back to `index.html` for client routes.
+Vite React operator console; Express serves `web/dist` in production builds.

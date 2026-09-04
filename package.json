@@ -9,7 +9,7 @@
     "dev:web": "npm run dev --prefix web",
     "build": "prisma generate && tsc && npm run build --prefix web",
     "start": "node dist/index.js",
-    "test": "node --import ./tests/preload.mjs --import tsx --test --test-concurrency=1 tests/index.test.ts",
+    "test": "node --import ./tests/preload.mjs --import tsx --test --test-concurrency=1 tests/**/*.test.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
